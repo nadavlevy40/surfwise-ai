@@ -1,51 +1,102 @@
-import type { NextApiRequest, NextApiResponse } from "next";
-import { OpenAI } from "openai";
-import { prisma } from "@/lib/prisma";
+import type { NextApiRequest, NextApiResponse } from 'next';
+import OpenAI from 'openai';
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  const {
+    stance = 'unknown',
+    skill = 'intermediate',
+    board = '',
+    goals = '',
+    conditions = '',
+    mediaType = 'Video(s) only',
+    videoTimestamps = [],
+    photos = [],
+    coachNotes = ''
+  } = req.body;
+
+  const systemPrompt = `
+You are a professional surf coach. Your job is to give clear, friendly, practical feedback.
+Audience: average surfers who want actionable guidance—not technical biomechanics.
+Style: positive, concise, encouraging, no jargon unless necessary.
+Never output angles or raw measurements unless the user asks for advanced details.
+Always include: 3–5 highlight bullets (top summary), targeted tips grouped by skill area, 2–3 simple drills for next session, and safety/etiquette reminders when relevant.
+When videos are provided, reference timestamps (e.g., “00:12–00:16: you stand too tall”).
+When photos are provided, reference the image index (e.g., “Photo #3: your front arm isn’t leading”).
+If both are provided, prefer timestamp callouts and add image notes where useful.
+If something is unclear due to quality, say so briefly and give best-effort advice.
+Avoid medical advice.
+Keep total output tight and readable.
+
+Use the schema provided at the end of this prompt.
+`;
+
+  const userPrompt = `
+SESSION CONTEXT
+- Stance: ${stance}
+- Skill: ${skill}
+- Board: ${board}
+- Goals: ${goals}
+- Conditions: ${conditions}
+
+INPUT
+- Media: ${mediaType}
+- Video timeline: ${videoTimestamps.length ? videoTimestamps.join(', ') : 'N/A'}
+- Photos: ${photos.length ? photos.map((p, i) => `Photo #${i + 1}`).join(', ') : 'N/A'}
+- Any coach notes from user: ${coachNotes || 'None'}
+
+RESPONSE REQUIREMENTS
+- Use the JSON schema below.
+- Keep language plain and positive, with specific corrections.
+- Use timestamp references for videos (mm:ss format).
+- Use “Photo #N” for photos.
+- Include 2–3 dry-land drills and 2–3 in-water drills tailored to the issues.
+- Add a short “What to practice next session” checklist.
+
+Required JSON Output Schema:
+{
+  "summary_highlights": ["string (max 120 chars per item, 3-5 items)"],
+  "sections": {
+    "takeoff": { "tips": ["string"] },
+    "stance_and_balance": { "tips": ["string"] },
+    "line_selection": { "tips": ["string"] },
+    "bottom_turn": { "tips": ["string"] },
+    "top_turn": { "tips": ["string"] },
+    "speed_management": { "tips": ["string"] },
+    "safety_and_etiquette": { "tips": ["string"] }
+  },
+  "moments": [
+    { "type": "video", "timecode": "mm:ss-mm:ss", "note": "string (<= 140 chars)" },
+    { "type": "photo", "photo_index": 3, "note": "string (<= 140 chars)" }
+  ],
+  "drills": {
+    "dry_land": ["string"],
+    "in_water": ["string"]
+  },
+  "next_session_checklist": ["string"],
+  "tone_tags": ["encouraging", "practical", "clear"]
+}
+`;
+
   try {
-    const { sessionId, payload } = req.body as { sessionId: string; payload: any };
-
-    const systemPrompt = `You are a professional surf coach. Provide clear, friendly, practical feedback.
-Audience: average surfers; avoid heavy biomechanics. 
-Always include: 3–5 highlight bullets, grouped tips (takeoff, stance_and_balance, line_selection, bottom_turn, top_turn, speed_management, safety_and_etiquette), 2–3 dry-land drills, 2–3 in-water drills, and a next-session checklist. 
-Use timestamps if available; else keep it general.`;
-
-    const userPrompt = `SESSION CONTEXT
-- Stance: ${payload.stance}
-- Skill: ${payload.skillLevel}
-- Board: ${payload.boardType || "Not specified"}
-- Goals: ${payload.goals || "General improvement"}
-- Conditions: ${payload.conditions || "Not specified"}
-- Media: ${payload.mediaSummary}`;
-
-    const response = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.4,
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4-1106-preview',
       messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
       ],
-      response_format: { type: "json_object" }
+      response_format: 'json'
     });
 
-    const json = JSON.parse(response.choices[0].message.content || "{}");
-
-    await prisma.session.update({
-      where: { id: sessionId },
-      data: { feedback: json, analysisStatus: "completed" }
-    });
-
-    res.json({ ok: true, feedback: json });
-  } catch (e:any) {
-    console.error(e);
-    await prisma.session.update({
-      where: { id: req.body.sessionId },
-      data: { analysisStatus: "error" }
-    });
-    res.status(500).json({ error: "Analysis failed" });
+    const feedback = completion.choices[0].message?.content;
+    return res.status(200).json({ feedback: JSON.parse(feedback ?? '{}') });
+  } catch (error) {
+    console.error('OpenAI error:', error);
+    return res.status(500).json({ error: 'Failed to generate surf feedback.' });
   }
 }
