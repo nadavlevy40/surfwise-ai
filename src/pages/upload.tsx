@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useRouter } from "next/router";
 import Layout from "@/components/Layout";
 import { Card, CardHeader, CardContent, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 type FilesState = { videos: File[]; photos: File[] };
 
 export default function UploadPage() {
+  const router = useRouter();
   const [files, setFiles] = useState<FilesState>({ videos: [], photos: [] });
   const [stance, setStance] = useState("regular");
   const [skill, setSkill] = useState("intermediate");
@@ -16,6 +18,7 @@ export default function UploadPage() {
   const [conditions, setConditions] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState(""); // To show specific progress steps
 
   const onSelect = (selected: FileList | null) => {
     if (!selected) return;
@@ -33,23 +36,80 @@ export default function UploadPage() {
     if (files.videos.length === 0 && files.photos.length === 0) {
       setError("Please upload at least one video or photo"); return;
     }
-    setError(null); setLoading(true);
+    setError(null); 
+    setLoading(true);
 
-    // 1) upload files
-    const uploads: string[] = [];
-    for (const f of [...files.videos, ...files.photos]) {
-      const fd = new FormData(); fd.append("file", f);
-      const r = await fetch("/api/upload", { method: "POST", body: fd });
-      const j = await r.json(); 
+    try {
+      // 1. Upload files to local server
+      setStatus("Uploading media...");
+      const videoUrls: string[] = [];
+      const photoUrls: string[] = [];
+
+      for (const f of [...files.videos]) {
+        const fd = new FormData(); fd.append("file", f);
+        const r = await fetch("/api/upload", { method: "POST", body: fd });
+        if (!r.ok) throw new Error("Video upload failed");
+        const j = await r.json();
+        videoUrls.push(j.fileUrl);
+      }
       
+      // (Simplified: we handle photos similarly, but focusing on video for now)
+      for (const f of [...files.photos]) {
+        const fd = new FormData(); fd.append("file", f);
+        const r = await fetch("/api/upload", { method: "POST", body: fd });
+        if (!r.ok) throw new Error("Photo upload failed");
+        const j = await r.json();
+        photoUrls.push(j.fileUrl);
+      }
+
+      // 2. Create Session in DB
+      setStatus("Creating session...");
+      const sessionPayload = {
+        title: `Session ${new Date().toLocaleDateString()}`,
+        userId: "demo-user-123", // Placeholder until Auth is set up
+        stance,
+        skillLevel: skill,
+        boardType: board,
+        goals,
+        conditions,
+        videoUrls,
+        photoUrls,
+        analysisStatus: 'processing'
+      };
+
+      const sessionRes = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(sessionPayload)
+      });
+      
+      if (!sessionRes.ok) throw new Error("Failed to create session");
+      const session = await sessionRes.json();
+
+      // 3. Trigger AI Analysis
+      setStatus("AI Coach is watching your video...");
+      await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: session.id })
+      });
+
+      // 4. Redirect
+      router.push(`/results/${session.id}`);
+
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "Something went wrong");
+      setLoading(false);
     }
   };
+
   return (
     <Layout>
       <div className="max-w-4xl mx-auto space-y-6">
         <div>
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-2">Upload Your Surf Session</h1>
-          <p className="text-gray-600">Add videos and photos, tell us about your goals, and get personalized coaching feedback.</p>
+          <p className="text-gray-600">Add videos, set your goals, and let Gemini analyze your technique.</p>
         </div>
 
         {error && <div className="p-3 rounded bg-red-50 border border-red-200 text-red-700">{error}</div>}
@@ -61,14 +121,8 @@ export default function UploadPage() {
             <div className="space-y-2">
               {files.videos.map((f,i)=>(
                 <div key={"v"+i} className="flex justify-between p-2 bg-blue-50 rounded border border-blue-200">
-                  <span>{f.name}</span>
-                  <button onClick={()=>removeFile("videos", i)}>✖</button>
-                </div>
-              ))}
-              {files.photos.map((f,i)=>(
-                <div key={"p"+i} className="flex justify-between p-2 bg-cyan-50 rounded border border-cyan-200">
-                  <span>{f.name}</span>
-                  <button onClick={()=>removeFile("photos", i)}>✖</button>
+                  <span className="truncate">{f.name}</span>
+                  <button onClick={()=>removeFile("videos", i)} className="text-red-500">✖</button>
                 </div>
               ))}
             </div>
@@ -80,16 +134,15 @@ export default function UploadPage() {
           <CardContent className="space-y-4">
             <div className="grid md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm mb-1">Stance</label>
-                <select value={stance} onChange={(e)=>setStance(e.target.value)} className="w-full border rounded-md h-10 px-3">
-                  <option value="regular">Regular</option>
-                  <option value="goofy">Goofy</option>
-                  <option value="unknown">Not sure</option>
+                <label className="block text-sm mb-1 font-medium">Stance</label>
+                <select value={stance} onChange={(e)=>setStance(e.target.value)} className="w-full border rounded-md h-10 px-3 bg-white">
+                  <option value="regular">Regular (Left foot forward)</option>
+                  <option value="goofy">Goofy (Right foot forward)</option>
                 </select>
               </div>
               <div>
-                <label className="block text-sm mb-1">Skill Level</label>
-                <select value={skill} onChange={(e)=>setSkill(e.target.value)} className="w-full border rounded-md h-10 px-3">
+                <label className="block text-sm mb-1 font-medium">Skill Level</label>
+                <select value={skill} onChange={(e)=>setSkill(e.target.value)} className="w-full border rounded-md h-10 px-3 bg-white">
                   <option value="beginner">Beginner</option>
                   <option value="intermediate">Intermediate</option>
                   <option value="advanced">Advanced</option>
@@ -97,21 +150,19 @@ export default function UploadPage() {
               </div>
             </div>
             <div>
-              <label className="block text-sm mb-1">Board Type and Length</label>
-              <Input value={board} onChange={(e)=>setBoard(e.target.value)} placeholder="e.g., Shortboard 6'2, Longboard 9'0" />
+              <label className="block text-sm mb-1 font-medium">Board Details</label>
+              <Input value={board} onChange={(e)=>setBoard(e.target.value)} placeholder="e.g., Pyzel Ghost 6'0" />
             </div>
             <div>
-              <label className="block text-sm mb-1">What are you working on?</label>
-              <Input value={goals} onChange={(e)=>setGoals(e.target.value)} placeholder="e.g., Pop-up speed, bottom turns, speed generation" />
-            </div>
-            <div>
-              <label className="block text-sm mb-1">Wave Conditions (optional)</label>
-              <Textarea value={conditions} onChange={(e)=>setConditions(e.target.value)} rows={2} placeholder="e.g., 3-4 ft, clean, beach break" />
+              <label className="block text-sm mb-1 font-medium">What are you working on?</label>
+              <Input value={goals} onChange={(e)=>setGoals(e.target.value)} placeholder="e.g., Generating speed, cutbacks" />
             </div>
           </CardContent>
         </Card>
 
-        <Button disabled={loading} className="w-full h-12">{loading? "Analyzing..." : "Analyze My Session"}</Button>
+        <Button disabled={loading} onClick={handleSubmit} className="w-full h-12 text-lg">
+          {loading ? status : "Analyze My Session"}
+        </Button>
       </div>
     </Layout>
   );
