@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
+import { PayPalButtons } from "@paypal/react-paypal-js";
 import useSWR from "swr";
 import Layout from "@/components/Layout";
 import { Card, CardContent } from "@/components/ui/card";
@@ -12,6 +13,8 @@ const fetcher = (url: string) => fetch(url).then(r => r.json());
 
 // --- SUB-COMPONENT: LOCKED CARD (The Upsell) ---
 const LockedManeuverCard = ({ event }: { event: any }) => {
+  const { user } = useAuth();
+
   return (
     <Card className="relative overflow-hidden border border-gray-200 shadow-sm bg-gray-50 mb-8 h-[300px]">
       {/* BLURRED CONTENT LAYER */}
@@ -28,18 +31,48 @@ const LockedManeuverCard = ({ event }: { event: any }) => {
       </div>
 
       {/* LOCK OVERLAY */}
-      <div className="absolute inset-0 flex flex-col items-center justify-center z-10 bg-white/30 backdrop-blur-[2px]">
-        <div className="bg-white p-8 rounded-2xl shadow-2xl text-center max-w-sm border border-gray-100">
+      <div className="absolute inset-0 flex flex-col items-center justify-center z-10 bg-white/40 backdrop-blur-sm">
+        <div className="bg-white p-8 rounded-2xl shadow-2xl text-center max-w-sm border border-gray-100 w-full">
           <div className="w-12 h-12 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-4">
             <Lock className="w-6 h-6" />
           </div>
-          <h3 className="text-xl font-extrabold text-gray-900 mb-2">Unlock {event.title} Analysis</h3>
+          <h3 className="text-xl font-extrabold text-gray-900 mb-2">Unlock Pro Analysis</h3>
           <p className="text-gray-500 text-sm mb-6">
-            Upgrade to Pro to see the detailed biomechanics breakdown, frame inspector, and coach corrections for this maneuver.
+            Get unlimited breakdowns, biomechanics, and frame inspection for <strong>$19/mo</strong>.
           </p>
-          <Button className="w-full bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700 text-white font-bold h-10 shadow-md">
-            Unlock Full Session ($19/mo)
-          </Button>
+          
+          {/* PAYPAL BUTTONS */}
+          <div className="w-full relative z-20">
+            <PayPalButtons 
+              style={{ layout: "vertical", shape: "pill", label: "subscribe" }}
+              createSubscription={(data, actions) => {
+                return actions.subscription.create({
+                  plan_id: process.env.NEXT_PUBLIC_PAYPAL_PLAN_ID! 
+                });
+              }}
+              onApprove={async (data, actions) => {
+                // Call our backend to verify and update DB
+                if (!user) return;
+                try {
+                  const res = await fetch("/api/paypal/verify", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ 
+                      subscriptionID: data.subscriptionID,
+                      userId: user.uid 
+                    })
+                  });
+                  if (res.ok) {
+                    alert("Welcome to Pro! Refreshing...");
+                    window.location.reload();
+                  }
+                } catch (err) {
+                  console.error("Verification failed", err);
+                }
+              }}
+            />
+          </div>
+          
         </div>
       </div>
     </Card>
