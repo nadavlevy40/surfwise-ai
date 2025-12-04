@@ -10,10 +10,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-
-# OS-specific files
-.DS_Store
-Thumbs.db
+*.log
 
 # Environment variables
 .env
@@ -22,35 +19,53 @@ Thumbs.db
 .env.test.local
 .env.production.local
 
+# Firebase Admin private keys (VERY IMPORTANT)
+firebase-key.json
+serviceAccountKey.json
+*.secret.json
+
+# Firebase emulator data
+firebase-debug.log
+.firebaserc
+.firebase/
+
+# Cloud Functions
+functions/node_modules/
+functions/lib/
+functions/.env
+functions/.env.local
+functions/*.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
 # IDE settings
 .vscode/
 .idea/
+*.swp
 
-# Mac system files
-*.DS_Store
-
-# Image/Video uploads (if stored locally and not needed in repo)
-public/uploads/
+# Image/Video uploads (local)
 uploads/
+public/uploads/
 tmp/
 
-# Prisma files (only generated files)
+# Prisma SQLite files (if used)
 prisma/dev.db
 prisma/dev.db-journal
 
-# Optional: Coverage reports
-coverage/
-
-# Optional: Log files
-*.log
-
-# Optional: TypeScript build artifacts
+# TypeScript build artifacts
 *.tsbuildinfo
 
-# Optional: local history (e.g., WebStorm)
+# Coverage tools
+coverage/
+
+# Local history (optional)
 .history/
 
-# Optional: lockfiles (you may choose to commit one if consistent across team)
+# Lockfiles (optional — if you don’t want them tracked)
 # package-lock.json
 # yarn.lock
 # pnpm-lock.yaml
+package-lock.json
+package.json
