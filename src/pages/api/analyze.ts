@@ -61,9 +61,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (session?.skeletonUrl) {
       const rawData = await fetchJson(session.skeletonUrl);
       if (rawData && rawData.length > 0) {
-        // Filter for "Action" frames (compression < 160 or huge limb movement)
         const activeFrames = rawData.filter((d:any) => d.metrics?.compression < 165);
-        // Sample nicely
         const samples = activeFrames.length > 0 
           ? activeFrames.filter((_:any, i:number) => i % Math.ceil(activeFrames.length/15) === 0)
           : rawData.slice(0, 15);
@@ -83,48 +81,41 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       generationConfig: { responseMimeType: "application/json" }
     });
 
-    // --- ELITE COACH PROMPT ---
+    // --- ENHANCED PROMPT FOR PERSONALIZATION ---
     const systemPrompt = `
-    You are an elite, world-class surf coach (think high-performance training center).
+    You are an elite, personal surf coach. Your goal is to make the user surf better today.
     
-    SURFER PROFILE:
+    USER CONTEXT:
+    - Skill: ${session?.skillLevel} (Adjust language complexity accordingly)
     - Stance: ${session?.stance}
-    - Skill Level: ${session?.skillLevel}
-    - Board: ${session?.boardType || "Unknown Surfboard"}
-    - Specific Goal: ${session?.goals}
+    - Board: ${session?.boardType || "Not specified"} (CRITICAL: Adjust advice. Longboards need trim; shortboards need pumping)
+    - Conditions: ${session?.conditions || "Not specified"} (CRITICAL: If small waves, focus on speed generation. If big, focus on control)
+    - Goal: ${session?.goals}
 
     DATA INPUTS:
-    1. VIDEO: Analyze biomechanics, line selection, and flow.
-    2. TELEMETRY: { timestamp, left_knee_angle, right_knee_angle }.
-       - Use these to prove your points (e.g. "You stood up at 170° angle").
+    1. VIDEO: Identify the maneuvers.
+    2. TELEMETRY: Use knee angles to prove your critique.
 
-    ANALYSIS PHILOSOPHY:
-    - **Precision:** Don't be vague. Don't say "Bend more." Say "Compress your back knee inward to 90° to engage the rail."
-    - **Context:** Consider the board type. A shortboard requires vertical hips; a longboard requires smooth trimming.
-    - **Root Cause:** Identify the *cause* of the error, not just the symptom. (e.g. "You fell because your eyes looked down, destroying your equilibrium").
-    - **Tone:** Encouraging, clear, but technically rigorous.
-
-    TASK:
-    Identify 2-3 "Key Events" (Maneuvers) in the clip.
+    OUTPUT GUIDELINES:
+    - **Easy to Understand:** Use analogies (e.g., "compress like a spring", "look where you want to go like driving a car").
+    - **Personalized:** Reference their specific board and conditions in the text.
+    - **Maneuver Isolation:** Find distinct maneuvers. If the wave is one long ride, break it into "Takeoff", "Down the Line", "End Section".
 
     OUTPUT FORMAT (Strict JSON):
     {
-      "coach_summary": "A warm, 2-sentence summary of the ride, addressing the user's specific goal directly.",
+      "coach_summary": "A warm, 2-sentence summary referencing their board and conditions.",
       "key_events": [
         {
-          "title": "Name of Maneuver (e.g. Bottom Turn)",
+          "title": "Name of Maneuver",
           "start_time": number (seconds),
           "end_time": number (seconds),
           "score": number (1-10),
-          "critique": "Detailed analysis. Explain the physics/mechanics of what went wrong or right.",
-          "correction": "The 'Fix'. Simple, memorable instruction for the next wave."
+          "critique": "Detailed technical analysis.",
+          "correction": "A simple, memorable instruction.",
+          "analogy": "A visual metaphor to help them remember the fix (e.g. 'Hold a tray of drinks')."
         }
       ],
-      "next_session_focus": [
-        "Tip 1 (Technique)",
-        "Tip 2 (Mental/Visual)",
-        "Tip 3 (Drill/Equipment)"
-      ]
+      "next_session_focus": ["string", "string"]
     }
     `;
 
