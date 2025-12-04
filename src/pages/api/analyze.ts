@@ -7,7 +7,6 @@ import path from "path";
 import https from "https";
 import os from "os";
 
-// Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
 const fileManager = new GoogleAIFileManager(process.env.GOOGLE_API_KEY || "");
 
@@ -16,14 +15,23 @@ const downloadFile = (url: string, dest: string) => {
     const file = fs.createWriteStream(dest);
     https.get(url, (response) => {
       response.pipe(file);
-      file.on('finish', () => {
-        file.close();
-        resolve(true);
-      });
+      file.on('finish', () => { file.close(); resolve(true); });
     }).on('error', (err) => {
       if (fs.existsSync(dest)) fs.unlinkSync(dest);
       reject(err);
     });
+  });
+};
+
+const fetchJson = (url: string) => {
+  return new Promise<any>((resolve, reject) => {
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); } catch(e) { resolve(null); }
+      });
+    }).on('error', reject);
   });
 };
 
@@ -35,86 +43,74 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const docRef = db.collection('sessions').doc(sessionId);
     const doc = await docRef.get();
-    
     if (!doc.exists) return res.status(404).json({ error: "Session not found" });
     const session = doc.data();
-    
-    if (!session?.videoUrls || session.videoUrls.length === 0) {
-      return res.status(400).json({ error: "No video found" });
-    }
 
+    if (!session?.videoUrls?.[0]) return res.status(400).json({ error: "No video" });
     const videoUrl = session.videoUrls[0];
     const tempFilePath = path.join(os.tmpdir(), `temp-${sessionId}.mp4`);
-
-    // Download & Upload to Gemini
+    
     await downloadFile(videoUrl, tempFilePath);
     const uploadResponse = await fileManager.uploadFile(tempFilePath, {
       mimeType: "video/mp4",
       displayName: `Session ${sessionId}`,
     });
 
-    // Poll for readiness
-    let file = await fileManager.getFile(uploadResponse.file.name);
-    while (file.state === FileState.PROCESSING) {
-      await new Promise((r) => setTimeout(r, 2000));
-      file = await fileManager.getFile(uploadResponse.file.name);
+    // Prepare Telemetry
+    let telemetrySummary = "No telemetry data available.";
+    if (session?.skeletonUrl) {
+      const rawData = await fetchJson(session.skeletonUrl);
+      if (rawData && rawData.length > 0) {
+        const activeFrames = rawData.filter((d:any) => d.metrics?.compression < 160);
+        const samples = activeFrames.length > 0 
+          ? activeFrames.filter((_:any, i:number) => i % Math.ceil(activeFrames.length/20) === 0)
+          : rawData.slice(0, 10);
+        telemetrySummary = JSON.stringify(samples);
+      }
     }
 
+    let file = await fileManager.getFile(uploadResponse.file.name);
+    while (file.state === FileState.PROCESSING) {
+      await new Promise(r => setTimeout(r, 2000));
+      file = await fileManager.getFile(uploadResponse.file.name);
+    }
     if (file.state === FileState.FAILED) throw new Error("Video processing failed.");
 
-    // --- THE UPGRADED PROMPT START ---
     const model = genAI.getGenerativeModel({ 
-      model: "gemini-2.5-pro",
+      model: "gemini-2.0-flash", 
       generationConfig: { responseMimeType: "application/json" }
     });
-    
-    const systemPrompt = `
-    You are an elite-level surf coach with expertise in biomechanics and wave physics. 
-    Your job is to analyze the attached surfing footage and provide ultra-specific, actionable feedback.
-    
-    SURFER PROFILE:
-    - Stance: ${session?.stance} (Watch for this specifically)
-    - Skill: ${session?.skillLevel}
-    - Current Goals: ${session?.goals}
 
-    ANALYSIS GUIDELINES:
-    1. **Visual Proof Required:** Do not give generic advice. For every critique, you must reference specific visual evidence from the video (e.g., "At the bottom turn, your leading arm was trailing behind...").
-    2. **Biomechanics Focus:** Focus on compression, rotation, eye gaze, rail engagement, and weight distribution.
-    3. **No Fluff:** Avoid phrases like "Great job!" or "Keep surfing!". Go straight to the technical correction.
-    4. **Sequential Breakdown:** Analyze the wave in phases: Setup -> Takeoff -> Bottom Turn -> Top Turn / Maneuver -> Exit.
+    // --- NEW PROMPT FOR MANEUVER BREAKDOWN ---
+    const systemPrompt = `
+    You are an elite biomechanics surf coach.
+    
+    INPUTS:
+    1. VIDEO: Watch for specific maneuvers (Takeoff, Bottom Turn, Top Turn, Cutback).
+    2. TELEMETRY: { timestamp, left_knee_angle, right_knee_angle }.
+       - Use these timestamps to pinpoint exactly when the maneuver happens.
+
+    TASK:
+    Identify 2-3 critical "Key Events" in the wave. For each event, provide the start/end time and specific feedback.
+
+    SURFER GOALS: ${session?.goals || "General improvement"}
 
     OUTPUT FORMAT (Strict JSON):
     {
-      "summary_highlights": [
-        "A short, high-impact bullet point about their best move.",
-        "A short, high-impact bullet point about their biggest area for fix."
-      ],
-      "sections": {
-        "takeoff": { 
-          "tips": ["Specific observation + Correction"] 
-        },
-        "speed_generation": { 
-          "tips": ["Specific observation + Correction"] 
-        },
-        "maneuvers": { 
-          "tips": ["Specific observation + Correction"] 
-        },
-        "style_and_flow": { 
-          "tips": ["Specific observation + Correction"] 
+      "coach_summary": "One sentence summary of the whole ride.",
+      "key_events": [
+        {
+          "title": "Name of Maneuver (e.g. Bottom Turn)",
+          "start_time": number (seconds, e.g. 2.5),
+          "end_time": number (seconds, e.g. 4.0),
+          "score": number (1-10),
+          "critique": "Specific technical feedback citing visual or telemetry evidence.",
+          "correction": "One actionable drill or tip."
         }
-      },
-      "drills": { 
-        "dry_land": ["Name of drill: Description of how to do it on land."], 
-        "in_water": ["Name of drill: Description of focus while surfing."] 
-      },
-      "next_session_checklist": [
-        "One technical cue to remember (e.g., 'Touch front knee on bottom turn')",
-        "One equipment or positioning cue",
-        "One mental cue"
-      ]
+      ],
+      "next_session_focus": ["string", "string"]
     }
     `;
-    // --- THE UPGRADED PROMPT END ---
 
     const result = await model.generateContent([
       { fileData: { mimeType: file.mimeType, fileUri: file.uri } },
@@ -124,12 +120,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const responseText = result.response.text();
     const startIndex = responseText.indexOf('{');
     const endIndex = responseText.lastIndexOf('}');
+    if (startIndex === -1 || endIndex === -1) throw new Error("Invalid JSON");
     
-    if (startIndex === -1 || endIndex === -1) throw new Error("Invalid JSON from AI");
-    
-    const cleanJson = responseText.substring(startIndex, endIndex + 1);
-    const feedback = JSON.parse(cleanJson);
-
+    const feedback = JSON.parse(responseText.substring(startIndex, endIndex + 1));
     await docRef.update({ feedback, analysisStatus: "completed" });
 
     if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
@@ -137,7 +130,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   } catch (e: any) {
     console.error(e);
-    try { await db.collection('sessions').doc(sessionId).update({ analysisStatus: "error" }); } catch (err) {}
+    try { await db.collection('sessions').doc(sessionId).update({ analysisStatus: "error" }); } catch {}
     res.status(500).json({ error: e.message });
   }
 }
