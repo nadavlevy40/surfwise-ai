@@ -35,6 +35,9 @@ const fetchJson = (url: string) => {
   });
 };
 
+// Helper: Wait function
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -71,7 +74,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     let file = await fileManager.getFile(uploadResponse.file.name);
     while (file.state === FileState.PROCESSING) {
-      await new Promise(r => setTimeout(r, 2000));
+      await wait(2000);
       file = await fileManager.getFile(uploadResponse.file.name);
     }
     if (file.state === FileState.FAILED) throw new Error("Video processing failed.");
@@ -81,25 +84,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       generationConfig: { responseMimeType: "application/json" }
     });
 
-    // --- ENHANCED PROMPT FOR PERSONALIZATION ---
     const systemPrompt = `
     You are an elite, personal surf coach. Your goal is to make the user surf better today.
     
     USER CONTEXT:
-    - Skill: ${session?.skillLevel} (Adjust language complexity accordingly)
+    - Skill: ${session?.skillLevel}
     - Stance: ${session?.stance}
-    - Board: ${session?.boardType || "Not specified"} (CRITICAL: Adjust advice. Longboards need trim; shortboards need pumping)
-    - Conditions: ${session?.conditions || "Not specified"} (CRITICAL: If small waves, focus on speed generation. If big, focus on control)
+    - Board: ${session?.boardType || "Not specified"}
+    - Conditions: ${session?.conditions || "Not specified"}
     - Goal: ${session?.goals}
 
     DATA INPUTS:
     1. VIDEO: Identify the maneuvers.
     2. TELEMETRY: Use knee angles to prove your critique.
-
-    OUTPUT GUIDELINES:
-    - **Easy to Understand:** Use analogies (e.g., "compress like a spring", "look where you want to go like driving a car").
-    - **Personalized:** Reference their specific board and conditions in the text.
-    - **Maneuver Isolation:** Find distinct maneuvers. If the wave is one long ride, break it into "Takeoff", "Down the Line", "End Section".
 
     OUTPUT FORMAT (Strict JSON):
     {
@@ -112,17 +109,38 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           "score": number (1-10),
           "critique": "Detailed technical analysis.",
           "correction": "A simple, memorable instruction.",
-          "analogy": "A visual metaphor to help them remember the fix (e.g. 'Hold a tray of drinks')."
+          "analogy": "A visual metaphor to help them remember the fix."
         }
       ],
       "next_session_focus": ["string", "string"]
     }
     `;
 
-    const result = await model.generateContent([
-      { fileData: { mimeType: file.mimeType, fileUri: file.uri } },
-      { text: systemPrompt },
-    ]);
+    // --- NEW: RETRY LOGIC FOR RATE LIMITS ---
+    let result;
+    let attempts = 0;
+    const maxAttempts = 3;
+
+    while (attempts < maxAttempts) {
+      try {
+        result = await model.generateContent([
+          { fileData: { mimeType: file.mimeType, fileUri: file.uri } },
+          { text: systemPrompt },
+        ]);
+        break; // Success! Exit loop
+      } catch (apiError: any) {
+        // Check for 429 (Too Many Requests) or 503 (Service Unavailable)
+        if (apiError.status === 429 || apiError.status === 503 || apiError.message?.includes('429')) {
+          console.log(`⚠️ Rate limit hit. Retrying in 10 seconds... (Attempt ${attempts + 1}/${maxAttempts})`);
+          await wait(10000); // Wait 10 seconds
+          attempts++;
+        } else {
+          throw apiError; // Fatal error, stop trying
+        }
+      }
+    }
+
+    if (!result) throw new Error("Failed to generate analysis after retries.");
 
     const responseText = result.response.text();
     const startIndex = responseText.indexOf('{');
@@ -136,7 +154,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.json({ ok: true, feedback });
 
   } catch (e: any) {
-    console.error(e);
+    console.error("Analysis Failed:", e);
+    // Mark as error so the UI stops spinning
     try { await db.collection('sessions').doc(sessionId).update({ analysisStatus: "error" }); } catch {}
     res.status(500).json({ error: e.message });
   }
