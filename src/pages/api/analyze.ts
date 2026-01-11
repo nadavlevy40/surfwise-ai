@@ -1,14 +1,13 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { GoogleAIFileManager, FileState } from "@google/generative-ai/server";
 import { db } from "@/lib/firebase";
 import fs from "fs";
 import path from "path";
 import https from "https";
 import os from "os";
+import ffmpeg from "fluent-ffmpeg";
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
-const fileManager = new GoogleAIFileManager(process.env.GOOGLE_API_KEY || "");
 
 const downloadFile = (url: string, dest: string) => {
   return new Promise((resolve, reject) => {
@@ -23,25 +22,41 @@ const downloadFile = (url: string, dest: string) => {
   });
 };
 
-const fetchJson = (url: string) => {
-  return new Promise<any>((resolve, reject) => {
-    https.get(url, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); } catch(e) { resolve(null); }
-      });
-    }).on('error', reject);
+// Extract Frames (We still need frames so the AI can "see" the motion)
+const extractFrames = (videoPath: string, outputDir: string) => {
+  return new Promise<string[]>((resolve, reject) => {
+    ffmpeg(videoPath)
+      .outputOptions("-vf", "fps=5,scale=480:-1") 
+      .output(`${outputDir}/frame-%03d.jpg`)
+      .on("end", () => {
+        const files = fs.readdirSync(outputDir)
+          .filter(f => f.endsWith('.jpg'))
+          .sort()
+          .map(f => path.join(outputDir, f));
+        resolve(files);
+      })
+      .on("error", (err) => reject(err))
+      .run();
   });
 };
 
-// Helper: Wait function
-const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const fileToGenerativePart = (path: string, mimeType: string) => {
+  return {
+    inlineData: {
+      data: fs.readFileSync(path).toString("base64"),
+      mimeType
+    },
+  };
+};
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { sessionId } = req.body;
+  const tempDir = path.join(os.tmpdir(), `session-${sessionId}`);
+  if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+  
+  const videoPath = path.join(tempDir, "input.mp4");
 
   try {
     const docRef = db.collection('sessions').doc(sessionId);
@@ -49,35 +64,25 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!doc.exists) return res.status(404).json({ error: "Session not found" });
     const session = doc.data();
 
-    if (!session?.videoUrls?.[0]) return res.status(400).json({ error: "No video" });
-    const videoUrl = session.videoUrls[0];
-    const tempFilePath = path.join(os.tmpdir(), `temp-${sessionId}.mp4`);
-    
-    await downloadFile(videoUrl, tempFilePath);
-    const uploadResponse = await fileManager.uploadFile(tempFilePath, {
-      mimeType: "video/mp4",
-      displayName: `Session ${sessionId}`,
-    });
+    await downloadFile(session?.videoUrls?.[0], videoPath);
 
-    // Prepare Telemetry
-    let telemetrySummary = "No telemetry data available.";
-    if (session?.skeletonUrl) {
-      const rawData = await fetchJson(session.skeletonUrl);
-      if (rawData && rawData.length > 0) {
-        const activeFrames = rawData.filter((d:any) => d.metrics?.compression < 165);
-        const samples = activeFrames.length > 0 
-          ? activeFrames.filter((_:any, i:number) => i % Math.ceil(activeFrames.length/15) === 0)
-          : rawData.slice(0, 15);
-        telemetrySummary = JSON.stringify(samples);
+    const allFramePaths = await extractFrames(videoPath, tempDir);
+    
+    // Smart Downsampling: Ensure we see the WHOLE video by taking 300 even samples
+    const TARGET_FRAME_COUNT = 300;
+    let selectedFrames = [];
+    
+    if (allFramePaths.length <= TARGET_FRAME_COUNT) {
+      selectedFrames = allFramePaths;
+    } else {
+      const step = allFramePaths.length / TARGET_FRAME_COUNT;
+      for (let i = 0; i < TARGET_FRAME_COUNT; i++) {
+        const index = Math.floor(i * step);
+        if (allFramePaths[index]) selectedFrames.push(allFramePaths[index]);
       }
     }
 
-    let file = await fileManager.getFile(uploadResponse.file.name);
-    while (file.state === FileState.PROCESSING) {
-      await wait(2000);
-      file = await fileManager.getFile(uploadResponse.file.name);
-    }
-    if (file.state === FileState.FAILED) throw new Error("Video processing failed.");
+    const imageParts = selectedFrames.map(p => fileToGenerativePart(p, "image/jpeg"));
 
     const model = genAI.getGenerativeModel({ 
       model: "gemini-2.0-flash", 
@@ -85,78 +90,54 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
 
     const systemPrompt = `
-    You are an elite, personal surf coach. Your goal is to make the user surf better today.
+    You are an Elite Surf Coach analyzing a full training session.
     
-    USER CONTEXT:
-    - Skill: ${session?.skillLevel}
-    - Stance: ${session?.stance}
-    - Board: ${session?.boardType || "Not specified"}
-    - Conditions: ${session?.conditions || "Not specified"}
-    - Goal: ${session?.goals}
+    YOUR MISSION:
+    Identify and list every distinct Drill or Maneuver attempt in the session.
+    
+    CONTEXT:
+    - The user wants a LIST of what they did.
+    - They do NOT need timestamps.
+    - They DO need you to separate different events (e.g. "First Wave", "Second Wave").
 
-    DATA INPUTS:
-    1. VIDEO: Identify the maneuvers.
-    2. TELEMETRY: Use knee angles to prove your critique.
+    ANALYSIS RULES:
+    1. **Separate by Attempt:** If the surfer rides a wave, falls, paddles back, and rides again... that is TWO items in the list.
+    2. **Look for 360s:** Check for rotation. If they spin, call it an "Air Reverse" or "360".
+    3. **Ignore "Nothing" Time:** Do not create list items for paddling or sitting. Only list the Action.
 
     OUTPUT FORMAT (Strict JSON):
     {
-      "coach_summary": "A warm, 2-sentence summary referencing their board and conditions.",
+      "coach_summary": "Overall feedback on the session intensity and performance.",
       "key_events": [
         {
-          "title": "Name of Maneuver",
-          "start_time": number (seconds),
-          "end_time": number (seconds),
-          "score": number (1-10),
-          "critique": "Detailed technical analysis.",
-          "correction": "A simple, memorable instruction.",
-          "analogy": "A visual metaphor to help them remember the fix."
+          "title": "Drill Name (e.g. 'Opening Bottom Turn', '360 Air Attempt')",
+          "score": 0,
+          "critique": "Technical analysis of this specific move.",
+          "correction": "One specific fix.",
+          "analogy": "Visual metaphor."
         }
       ],
-      "next_session_focus": ["string", "string"]
+      "next_session_focus": ["Focus 1", "Focus 2"]
     }
     `;
 
-    // --- NEW: RETRY LOGIC FOR RATE LIMITS ---
-    let result;
-    let attempts = 0;
-    const maxAttempts = 3;
-
-    while (attempts < maxAttempts) {
-      try {
-        result = await model.generateContent([
-          { fileData: { mimeType: file.mimeType, fileUri: file.uri } },
-          { text: systemPrompt },
-        ]);
-        break; // Success! Exit loop
-      } catch (apiError: any) {
-        // Check for 429 (Too Many Requests) or 503 (Service Unavailable)
-        if (apiError.status === 429 || apiError.status === 503 || apiError.message?.includes('429')) {
-          console.log(`⚠️ Rate limit hit. Retrying in 10 seconds... (Attempt ${attempts + 1}/${maxAttempts})`);
-          await wait(10000); // Wait 10 seconds
-          attempts++;
-        } else {
-          throw apiError; // Fatal error, stop trying
-        }
-      }
-    }
-
-    if (!result) throw new Error("Failed to generate analysis after retries.");
+    const result = await model.generateContent([
+      systemPrompt, 
+      ...imageParts
+    ]);
 
     const responseText = result.response.text();
-    const startIndex = responseText.indexOf('{');
-    const endIndex = responseText.lastIndexOf('}');
-    if (startIndex === -1 || endIndex === -1) throw new Error("Invalid JSON");
-    
-    const feedback = JSON.parse(responseText.substring(startIndex, endIndex + 1));
-    await docRef.update({ feedback, analysisStatus: "completed" });
+    const cleanJson = responseText.substring(responseText.indexOf('{'), responseText.lastIndexOf('}') + 1);
+    const feedback = JSON.parse(cleanJson);
 
-    if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+    await docRef.update({ feedback, analysisStatus: "completed" });
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    
     res.json({ ok: true, feedback });
 
   } catch (e: any) {
-    console.error("Analysis Failed:", e);
-    // Mark as error so the UI stops spinning
-    try { await db.collection('sessions').doc(sessionId).update({ analysisStatus: "error" }); } catch {}
+    console.error("Analysis Error:", e);
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
     res.status(500).json({ error: e.message });
   }
 }

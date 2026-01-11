@@ -3,10 +3,10 @@ import { useRouter } from "next/router";
 import { PayPalButtons } from "@paypal/react-paypal-js";
 import useSWR from "swr";
 import Layout from "@/components/Layout";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card"; 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Lock, Zap } from "lucide-react";
+import { Lock } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
@@ -29,23 +29,28 @@ const ManeuverCard = ({ event, videoUrl, telemetry, isPro, isLocked }: { event: 
   // 2. Generate Filmstrip
   useEffect(() => {
     if (!videoUrl || event.start_time === undefined || event.end_time === undefined) return;
+    
     const extractFrames = async () => {
       const vid = document.createElement('video');
       vid.src = `/api/proxy?url=${encodeURIComponent(videoUrl)}&t=${Date.now()}`;
       vid.crossOrigin = "anonymous"; 
       vid.muted = true;
+      
       await new Promise((resolve) => { 
         vid.onloadeddata = resolve;
         vid.onerror = () => resolve(null);
       });
+      
       const captured: string[] = [];
       const duration = event.end_time - event.start_time;
-      const validDuration = duration > 0 ? duration : 2; 
+      const validDuration = duration > 0 ? duration : 2;
       const frameCount = 10; 
       const step = validDuration / (frameCount - 1);
+
       for (let i = 0; i < frameCount; i++) {
         vid.currentTime = event.start_time + (i * step);
         await new Promise(r => { vid.onseeked = r; });
+        
         const canvas = document.createElement('canvas');
         canvas.width = 320; 
         canvas.height = 180;
@@ -60,6 +65,7 @@ const ManeuverCard = ({ event, videoUrl, telemetry, isPro, isLocked }: { event: 
     extractFrames();
   }, [videoUrl, event]);
 
+  // 3. Loop Logic
   const handleTimeUpdate = () => {
     if (!videoRef.current || staticFrame) return; 
     const t = videoRef.current.currentTime;
@@ -72,10 +78,12 @@ const ManeuverCard = ({ event, videoUrl, telemetry, isPro, isLocked }: { event: 
     }
   };
 
+  // 4. Auto-Crop Logic
   const getCropStyle = () => {
     if (!telemetry || telemetry.length === 0) return {};
     const midTime = (event.start_time + event.end_time) / 2;
     const dataPoint = telemetry.find((t:any) => Math.abs(t.time - midTime) < 0.5);
+    
     if (dataPoint && dataPoint.landmarks) {
       const hipX = dataPoint.landmarks[23].x * 100; 
       const hipY = dataPoint.landmarks[23].y * 100; 
@@ -85,10 +93,11 @@ const ManeuverCard = ({ event, videoUrl, telemetry, isPro, isLocked }: { event: 
   };
 
   return (
-    <Card className={`overflow-hidden border border-gray-200 shadow-sm bg-white mb-8 transition-all ${isLocked ? 'blur-[6px] opacity-60 pointer-events-none select-none grayscale-[0.5]' : ''}`}>
-      <div className="flex flex-col lg:flex-row lg:h-[420px]">
+    // FIX: Enforce fixed height (lg:h-[500px]) and Flex layout
+    <Card className={`overflow-hidden border border-gray-200 shadow-sm bg-white mb-8 transition-all lg:h-[500px] flex flex-col lg:flex-row ${isLocked ? 'blur-[5px] opacity-70 pointer-events-none select-none grayscale-[0.3]' : ''}`}>
         
-        <div className="w-full lg:w-[55%] bg-black relative group flex-shrink-0 aspect-video lg:aspect-auto">
+        {/* LEFT: VIDEO (Fixed 55% width, 100% height) */}
+        <div className="w-full lg:w-[55%] bg-black relative group flex-shrink-0 h-[300px] lg:h-full">
           {!isPro && !isLocked && (
             <div className="absolute top-2 right-2 z-20">
                <Badge variant="destructive" className="flex gap-1 items-center bg-black/50 hover:bg-black/70 border-0 backdrop-blur">
@@ -100,9 +109,12 @@ const ManeuverCard = ({ event, videoUrl, telemetry, isPro, isLocked }: { event: 
           {staticFrame ? (
              <div className="relative w-full h-full bg-black flex items-center justify-center">
                <img src={staticFrame} alt="Analysis" className="w-full h-full object-contain" />
-               <Button onClick={() => setStaticFrame(null)} className="absolute bottom-4 right-4 bg-white text-black hover:bg-gray-200 font-bold shadow-lg">
+               <Button onClick={() => setStaticFrame(null)} className="absolute bottom-6 right-6 bg-white text-black hover:bg-gray-200 font-bold shadow-xl z-30">
                  ▶ Resume Video
                </Button>
+               <div className="absolute top-4 left-4 bg-blue-600 text-white text-[10px] font-bold px-2 py-1 rounded shadow uppercase">
+                 Static View
+               </div>
              </div>
           ) : (
              <>
@@ -124,8 +136,11 @@ const ManeuverCard = ({ event, videoUrl, telemetry, isPro, isLocked }: { event: 
           )}
         </div>
 
-        <div className="flex-1 p-6 flex flex-col h-full overflow-y-auto bg-slate-50">
-          <div>
+        {/* RIGHT: CONTENT (Flex Column with internal scrolling) */}
+        <div className="flex-1 p-6 flex flex-col h-full bg-slate-50 overflow-hidden relative">
+          
+          {/* SCROLLABLE TEXT AREA */}
+          <div className="overflow-y-auto pr-2 custom-scrollbar flex-1">
             <div className="flex justify-between items-center mb-4">
               <h3 className="font-extrabold text-2xl text-gray-900">{event.title}</h3>
               <Badge className={event.score >= 8 ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"}>
@@ -133,45 +148,47 @@ const ManeuverCard = ({ event, videoUrl, telemetry, isPro, isLocked }: { event: 
               </Badge>
             </div>
             
-            <p className="text-gray-700 text-sm leading-relaxed mb-4">
+            <p className="text-gray-700 text-sm leading-relaxed mb-6">
               {event.critique}
             </p>
             
-            <div className="bg-white p-4 rounded-xl border border-blue-100 shadow-sm mb-2">
+            <div className="bg-white p-4 rounded-xl border border-blue-100 shadow-sm mb-4">
               <span className="text-blue-600 font-bold text-xs uppercase tracking-wider block mb-1">Coach's Fix</span>
               <p className="text-gray-900 font-medium text-sm">{event.correction}</p>
             </div>
 
             {event.analogy && (
-              <div className="flex items-center gap-2 text-sm text-gray-500 italic">
+              <div className="flex items-center gap-2 text-sm text-gray-500 italic mb-4">
                 <span>🧠</span>
                 <span>"{event.analogy}"</span>
               </div>
             )}
           </div>
 
-          <div className="mt-auto pt-6">
+          {/* FIXED FILMSTRIP AT BOTTOM */}
+          <div className="mt-4 pt-4 border-t border-gray-200">
             <div className="flex justify-between items-end mb-2">
                <p className="text-[10px] text-gray-400 uppercase font-bold">Frame Inspector</p>
                {!isPro && <span className="text-[10px] text-red-500 font-bold flex items-center gap-1"><Lock className="w-3 h-3"/> Limited Res</span>}
             </div>
-            <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-thin">
-              {frames.map((img, i) => (
+            <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide h-[60px] items-center">
+              {frames.length > 0 ? frames.map((img, i) => (
                 <button 
                   key={i} 
                   onClick={() => setStaticFrame(img)}
                   className={`
-                    relative min-w-[70px] h-[40px] rounded-md overflow-hidden border-2 transition-all 
-                    ${staticFrame === img ? 'border-blue-500 ring-2 ring-blue-200' : 'border-gray-200 hover:border-gray-400'}
+                    relative min-w-[70px] h-[40px] rounded-md overflow-hidden border-2 transition-all shrink-0
+                    ${staticFrame === img ? 'border-blue-500 ring-2 ring-blue-200 scale-105' : 'border-gray-200 hover:border-gray-400'}
                   `}
                 >
                   <img src={img} alt="frame" className="w-full h-full object-cover" />
                 </button>
-              ))}
+              )) : (
+                <span className="text-xs text-gray-400 animate-pulse">Loading frames...</span>
+              )}
             </div>
           </div>
         </div>
-      </div>
     </Card>
   );
 };
@@ -213,10 +230,9 @@ export default function ResultsPage(){
 
   return (
     <Layout>
-      <div className="relative min-h-screen pb-32">
+      <div className="relative min-h-screen pb-40"> 
         <div className="max-w-6xl mx-auto px-4">
           
-          {/* Header & Toggle */}
           <div className="text-center py-12 relative">
             <Badge variant="secondary" className="mb-3 px-3 py-1">{new Date(s.createdAt).toLocaleDateString()}</Badge>
             <h1 className="text-4xl font-extrabold text-gray-900 mb-4">{s.title || "Session Analysis"}</h1>
@@ -225,9 +241,9 @@ export default function ResultsPage(){
             </p>
             <div className="absolute top-4 right-4">
                <div className="flex items-center gap-2 bg-gray-100 p-2 rounded-lg">
-                  <span className="text-xs font-bold text-gray-500">DEV MODE:</span>
+                  <span className="text-xs font-bold text-gray-500">DEV:</span>
                   <Button size="sm" onClick={togglePro} className={isPro ? "bg-black text-white" : "bg-white text-black border"}>
-                    {isPro ? "Viewing as PRO" : "Viewing as FREE"}
+                    {isPro ? "PRO" : "FREE"}
                   </Button>
                </div>
             </div>
@@ -235,7 +251,7 @@ export default function ResultsPage(){
 
           {isNewFormat ? (
             <div className="space-y-8">
-              <div className="grid gap-10">
+              <div className="grid gap-8">
                 {s.feedback?.key_events?.map((event: any, i: number) => {
                   const isLocked = !isPro && i > 0;
                   return (
@@ -251,51 +267,47 @@ export default function ResultsPage(){
                 })}
               </div>
 
-              {/* LOCKED CONTENT OVERLAY & STICKY CTA */}
               {!isPro && s.feedback?.key_events?.length > 1 && (
-                <>
-                  {/* Floating CTA */}
-                  <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-full max-w-md px-4 animate-in slide-in-from-bottom-10 fade-in duration-700">
-                    <div className="bg-gray-900/95 backdrop-blur-md text-white p-6 rounded-2xl shadow-2xl border border-white/10 flex flex-col gap-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center shrink-0 animate-pulse">
-                          <Lock className="w-5 h-5 text-white" />
-                        </div>
-                        <div>
-                          <h4 className="font-bold text-lg">Unlock Full Analysis</h4>
-                          <p className="text-sm text-gray-400">See {s.feedback.key_events.length - 1} more maneuvers & biomechanics.</p>
-                        </div>
+                <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-full max-w-lg px-4 animate-in slide-in-from-bottom-10 fade-in duration-700">
+                  <div className="bg-gray-900/90 backdrop-blur-xl text-white p-6 rounded-2xl shadow-2xl border border-white/10 flex flex-col md:flex-row items-center gap-6">
+                    <div className="flex items-center gap-4">
+                      <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-full flex items-center justify-center shrink-0 animate-pulse shadow-lg">
+                        <Lock className="w-6 h-6 text-white" />
                       </div>
-                      
-                      <div className="w-full">
-                        <PayPalButtons 
-                          style={{ layout: "horizontal", height: 45, tagline: false }}
-                          createSubscription={(data, actions) => {
-                            return actions.subscription.create({
-                              plan_id: process.env.NEXT_PUBLIC_PAYPAL_PLAN_ID! 
-                            });
-                          }}
-                          onApprove={async (data, actions) => {
-                            if (!user) return;
-                            try {
-                              const res = await fetch("/api/paypal/verify", {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ subscriptionID: data.subscriptionID, userId: user.uid })
-                              });
-                              if (res.ok) window.location.reload();
-                            } catch (err) { console.error(err); }
-                          }}
-                        />
+                      <div>
+                        <h4 className="font-bold text-lg">Unlock Full Analysis</h4>
+                        <p className="text-sm text-gray-300">See {s.feedback.key_events.length - 1} hidden maneuvers & stats.</p>
                       </div>
                     </div>
+                    
+                    <div className="w-full md:w-auto min-w-[200px]">
+                      <PayPalButtons 
+                        style={{ layout: "horizontal", height: 45, tagline: false, shape: "pill" }}
+                        createSubscription={(data, actions) => {
+                          return actions.subscription.create({
+                            plan_id: process.env.NEXT_PUBLIC_PAYPAL_PLAN_ID! 
+                          });
+                        }}
+                        onApprove={async (data, actions) => {
+                          if (!user) return;
+                          try {
+                            const res = await fetch("/api/paypal/verify", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ subscriptionID: data.subscriptionID, userId: user.uid })
+                            });
+                            if (res.ok) window.location.reload();
+                          } catch (err) { console.error(err); }
+                        }}
+                      />
+                    </div>
                   </div>
-                </>
+                </div>
               )}
 
               <div className="grid md:grid-cols-3 gap-6">
                  {s.feedback?.next_session_focus?.map((tip:string, i:number) => (
-                   <Card key={i} className={`bg-white border-l-4 border-blue-500 shadow-sm p-5 ${!isPro && i > 0 ? 'blur-sm opacity-50' : ''}`}>
+                   <Card key={i} className={`bg-white border-l-4 border-blue-500 shadow-sm p-5 ${!isPro && i > 0 ? 'blur-[4px] opacity-60 pointer-events-none select-none' : ''}`}>
                      <div className="flex items-start gap-4">
                        <span className="w-8 h-8 flex-shrink-0 flex items-center justify-center bg-blue-100 text-blue-600 rounded-full font-bold text-sm">{i+1}</span>
                        <p className="text-gray-800 font-medium text-sm leading-relaxed">{tip}</p>
